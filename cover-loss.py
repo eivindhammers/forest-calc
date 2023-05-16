@@ -1,50 +1,67 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Created on Tue May 16 13:32:38 2023
-
-@author: eivindhammers
-"""
-
 import ee
+
+# Initialize Earth Engine
 ee.Initialize()
 
 # Load the vector data representing the area of interest
-area_of_interest = ee.FeatureCollection("FAO/GAUL_SIMPLIFIED_500m/2015/level0")
-print(area_of_interest.getInfo())
+world = ee.FeatureCollection('USDOS/LSIB_SIMPLE/2017')
 
 # Define the regions of interest
-regions = ['Brazil', 'Africa', 'Southeast Asia', 'Oceania']
+countries = ['Brazil', 'Dem Rep of the Congo', 'Indonesia']
 
 # Filter the area_of_interest feature collection
-filtered_area_of_interest = area_of_interest.filter(ee.Filter.inList('ADM0_NAME', regions))
+area_of_interest = world.filter(ee.Filter.inList('country_na', countries))
 
-# Print the information about the filtered feature collection
-print(filtered_area_of_interest.getInfo())
+# Get the list of ADM0 names for the area_of_interest
+adm0_names = area_of_interest.aggregate_array('country_na').distinct().getInfo()
 
-# Load the Global Forest Change dataset
-gfc_dataset = ee.Image('UMD/hansen/global_forest_change_2019_v1_8')
-start_year = 2020
-end_year = 2021
+for name in sorted(adm0_names):
+    print(name)
 
-# Filter the dataset for the desired years
-loss_image = gfc_dataset.select('loss').filter(ee.Filter.date(str(start_year), str(end_year))).sum()
-gain_image = gfc_dataset.select('gain').filter(ee.Filter.date(str(start_year), str(end_year))).sum()
+# Get the loss image.
+# This dataset is updated yearly, so we get the latest version.
+gfc2021 = ee.Image('UMD/hansen/global_forest_change_2021_v1_9')
+lossImage = gfc2021.select(['loss'])
+lossAreaImage = lossImage.multiply(ee.Image.pixelArea())
 
-loss_image_clipped = loss_image.clip(area_of_interest)
-gain_image_clipped = gain_image.clip(area_of_interest)
+lossYear = gfc2021.select(['lossyear'])
+lossByYear = lossAreaImage.addBands(lossYear).reduceRegion(
+    reducer=ee.Reducer.sum().group(1),
+    geometry=area_of_interest.geometry(),
+    scale=300,
+    maxPixels=1e9
+)
 
-tree_cover_change = loss_image_clipped.subtract(gain_image_clipped)
+# Print the loss by year statistics
+print(lossByYear.getInfo())
+
+# Convert the lossByYear dictionary to a FeatureCollection
+groups = ee.List(lossByYear.get('groups'))
+features = groups.map(lambda group: ee.Feature(None, group))
+
+# Create an ee.FeatureCollection from the list of features
+featureCollection = ee.FeatureCollection(features)
 
 # Set the export parameters
 export_params = {
-    'image': tree_cover_change,
-    'description': 'tree_cover_change',
-    'folder': 'output',
-    'scale': 30,  # Adjust the scale according to your needs
-    'region': area_of_interest.geometry().getInfo()
+    'collection': featureCollection,
+    'description': 'loss_by_year_export',
+    'fileFormat': 'CSV'
 }
 
-# Export the result as a GeoTIFF file
-task = ee.batch.Export.image.toDrive(**export_params)
+# Start the export task asynchronously
+task = ee.batch.Export.table.toDrive(**export_params)
 task.start()
+
+print('Export task has started. You can check the progress in the Earth Engine Code Editor or Earth Engine Apps.')
+
+# Get the task ID of the last Earth Engine request
+task_id = lossByYear.get('task_id')
+
+# Get the status of the task and display progress
+while True:
+    task_status = ee.data.getTaskStatus(task_id)[0]
+    if task_status['state'] == 'COMPLETED':
+        print('Task completed.')
+        break
+    print(f"Progress: {task_status['progress'] * 100}%")
