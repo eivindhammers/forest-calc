@@ -4,12 +4,12 @@ import pandas as pd
 import numpy as np
 import folium
 import matplotlib.cm as cm
-#from IPython.display import Image
 import contextily as ctx
 from PIL import Image
 import sys
 import urllib.request
 
+# Function to check if Earth Engine is initialized, and by extension, if it is authenticated.
 def ee_check_init():
   try:
     asset_id = 'USDOS/LSIB_SIMPLE/2017'
@@ -18,6 +18,7 @@ def ee_check_init():
   except ee.ee_exception.EEException:
     return False
 
+# Generate bar chart showing yearly forest loss 
 def forest_loss(country, fromYear, toYear, maxPixels, scale=30, bestEffort=False):
 
   if not ee_check_init():
@@ -84,7 +85,8 @@ def forest_loss(country, fromYear, toYear, maxPixels, scale=30, bestEffort=False
 
   plt.tight_layout()
   plt.show()
-    
+
+# Generate and clip images of intact forest and forest loss    
 def forest_images(country, year):
   
   if not ee_check_init():
@@ -101,23 +103,24 @@ def forest_images(country, year):
 
   # Get the loss image
   gfc = ee.Image('UMD/hansen/global_forest_change_2022_v1_10').clip(area_of_interest)
-  treecover2000 = gfc.select(['treecover2000'])
-  lossYear = gfc.select(['lossyear'])
+  treecover2000 = gfc.select('treecover2000')
+  lossYear = gfc.select('lossyear')
 
   # Generate the cumulative loss layer until year T-1
-  cumulativeLoss = lossYear.lt(year2).And(lossYear.neq(0)).rename("cumulativeLoss")
-
+  cumulativeLoss = lossYear.lt(year2).selfMask().rename('cumulativeLoss')
+    
   # Generate the forest loss layer for year T
-  lossThisYear = lossYear.eq(year2).rename("lossThisYear")
-
+  lossThisYear = lossYear.eq(year2).selfMask().rename('lossThisYear')
+  
   # Generate the intact forest layer
-  intactForestMask = cumulativeLoss.eq(1).Or(lossThisYear.eq(1)).Not()
-  intactForest = treecover2000.updateMask(intactForestMask).rename("intactForest")
+  intactForestMask = lossYear.lt(year2).Or(lossYear.eq(year2)).unmask(0).eq(0)
+  intactForest = treecover2000.updateMask(intactForestMask).rename('intactForest')
 
-  combinedImage = cumulativeLoss.addBands(lossThisYear).addBands(treecover2000)
+  combinedImage = cumulativeLoss.addBands(lossThisYear).addBands(intactForest)
     
   return combinedImage, area_of_interest
 
+# Generate interactive map of intact forest and forest loss
 def forest_map(country, year):
 
   if not ee_check_init():
@@ -142,14 +145,14 @@ def forest_map(country, year):
   # Add the baselayer (intactForest band)
   baselayerParams = {'min': 0, 'max': 100, 'palette': ['000000', '00FF00']}
   baselayerTile = folium.TileLayer(
-    tiles=combinedImage.select('treecover2000').getMapId(baselayerParams)['tile_fetcher'].url_format,
+    tiles=combinedImage.select('intactForest').getMapId(baselayerParams)['tile_fetcher'].url_format,
     attr=attribution,
     overlay=True,
     name='Intact forest in ' + str(year)
   ).add_to(forest_map)
 
   # Add the cumulative loss band
-  cumulativeLossParams = {'min': 0, 'max': 1, 'palette': ['6495ED']}
+  cumulativeLossParams = {'min': 0, 'max': 1, 'palette': ['000000', '6495ED']}
   cumulativeLossTile = folium.TileLayer(
     tiles=combinedImage.select('cumulativeLoss').getMapId(cumulativeLossParams)['tile_fetcher'].url_format,
     attr=attribution,
@@ -158,7 +161,7 @@ def forest_map(country, year):
   ).add_to(forest_map)
 
   # Add the loss this year band
-  lossParams = {'min': 0, 'max': 1, 'palette': ['FF0000']}
+  lossParams = {'min': 0, 'max': 1, 'palette': ['000000', 'FF0000']}
   lossTile = folium.TileLayer(
     tiles=combinedImage.select('lossThisYear').getMapId(lossParams)['tile_fetcher'].url_format,
     attr=attribution,
@@ -171,3 +174,4 @@ def forest_map(country, year):
 
   # Display or save the map
   display(forest_map)
+
