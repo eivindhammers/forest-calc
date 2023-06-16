@@ -3,8 +3,8 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 import folium
-import matplotlib.cm as cm
-import contextily as ctx
+#import matplotlib.cm as cm
+#import contextily as ctx
 from PIL import Image
 import sys
 import urllib.request
@@ -31,48 +31,88 @@ def forest_loss(country, fromYear, toYear, maxPixels, scale=30, bestEffort=False
   # Filter the area_of_interest feature collection
   area_of_interest = world.filter(ee.Filter.eq('country_na', country))
 
+  # Get primary humid tropical forest
+  trop = ee.ImageCollection('UMD/GLAD/PRIMARY_HUMID_TROPICAL_FORESTS/v1')
+  primaryForestMask = trop.select('Primary_HT_forests').mosaic().selfMask().unmask(0)
+  
   # Get the loss image.
   # This dataset is updated yearly, so we get the latest version.
-  gfc = ee.Image('UMD/hansen/global_forest_change_2022_v1_10')
-  lossImage = gfc.select(['loss'])
+  gfc = ee.Image('UMD/hansen/global_forest_change_2022_v1_10').updateMask(primaryForestMask)
+  
+  # Forest loss in any year (from 2001)
+  lossImage = gfc.select('loss')
+  
+  # Get the area of cumulative forest loss
   lossAreaImage = lossImage.multiply(ee.Image.pixelArea())
+ 
+  # Convert from square meters to hectares and then to million hectares
+  lossAreaHa = lossAreaImage.divide(1e4).divide(1e3)  
 
-  lossYear = gfc.select(['lossyear'])
-  lossAreaHa = lossAreaImage.divide(10000).divide(1e3)  # Convert from square meters to hectares and then to million hectares
+  # Year of forest loss in given pixel
+  lossYear = gfc.select('lossyear')
+  
+  # Construct grid and intersect with country polygon
+  # Get the first feature from 'selected'
+  aoi_first = ee.Feature(area_of_interest.first())
 
+  # Define a Python function to intersect the features in the grid collection with the country polygon
+  def intersect_feature(feature):
+    feature = ee.Feature(feature)
+    intersection = aoi_first.intersection(feature, 0.1)  # 0.1 is the allowed error margin
+    return intersection
+
+  grid = area_of_interest.geometry().coveringGrid(area_of_interest.geometry().projection())
+  gridClipped = grid.map(intersect_feature)
+  
   # Should scale parameter be explicitly set, or left determined by bestEffort?
-  if bestEffort:
-    lossByYear = lossAreaHa.addBands(lossYear).reduceRegion(
+  def calcLoss(feature):
+    loss = lossAreaHa.addBands(lossYear).reduceRegion(
       reducer=ee.Reducer.sum().group(1),
-      geometry=area_of_interest.geometry(),
+      geometry=feature.geometry(),
       maxPixels=maxPixels,
       bestEffort=bestEffort
     )
-    scale_used = "Best Effort" #lossByYear.getInfo()['scale']
-  else:
-    lossByYear = lossAreaHa.addBands(lossYear).reduceRegion(
-      reducer=ee.Reducer.sum().group(1),
-      geometry=area_of_interest.geometry(),
-      scale=scale,
-      maxPixels=maxPixels,
-      bestEffort=bestEffort
-    )
-    scale_used = scale
-    
-  lossDict = lossByYear.getInfo()
-  data = sorted(lossDict.items())
-  df = pd.DataFrame(data[0][1])
-  df['year'] = df['group'].replace(range(1, len(df) + 1), range(fromYear, toYear + 1))
+    return feature.set('loss', loss)
+  
+  lossByYear = gridClipped.map(calcLoss)
 
+  # Get the data into a dataframe 
+  dfs = []
+
+  # Iterate over each feature in the lossByYear feature collection
+  for feature in lossByYear.getInfo()['features']:
+    properties = feature['properties']
+    loss_data = properties['loss']
+    # Check if 'loss' data exists for the current feature
+    if loss_data:
+        loss_year = [entry['group'] for entry in loss_data['groups']]
+        loss_sum = [entry['sum'] for entry in loss_data['groups']]
+        temp_df = pd.DataFrame({'year': loss_year, 'loss': loss_sum})
+        dfs.append(temp_df)
+
+  df = pd.concat(dfs, ignore_index=True)
+
+  # Convert year to integer and make it YYYY format
+  df['year'] = df['year'].astype('int') + 2000
+    
+  # Summarize loss within year, over all cells
+  df = df.groupby('year')['loss'].sum().reset_index()
+  
+  scale_used = "Best Effort"
+    
+  # Create the table
+  table = pd.DataFrame({'Year': df['year'], 'Tree cover loss (Kha)': df['loss'].round(2)})
+  display(table)
+  
   fig, ax = plt.subplots(figsize=(10, 6))
 
-  df.plot('year', 'sum', kind='bar', legend=None, ax=ax)
+  df.plot('year', 'loss', kind='bar', legend=None, ax=ax)
   plt.xlabel('Year')
   plt.ylabel('Tree cover loss (Kha)')
   plt.title('Tree cover loss in ' + country)
 
   # Add data labels
-  for i, v in enumerate(df['sum']):
+  for i, v in enumerate(df['loss']):
     ax.text(i, v, str(round(v, 1)), ha='center', va='bottom')
 
   xticks = np.arange(0, len(df), 5)
@@ -101,8 +141,14 @@ def forest_images(country, year):
   # Filter the area_of_interest feature collection
   area_of_interest = world.filter(ee.Filter.eq('country_na', country))
 
-  # Get the loss image
-  gfc = ee.Image('UMD/hansen/global_forest_change_2022_v1_10').clip(area_of_interest)
+  # Get primary humid tropical forest
+  trop = ee.ImageCollection('UMD/GLAD/PRIMARY_HUMID_TROPICAL_FORESTS/v1')
+  primaryForestMask = trop.select('Primary_HT_forests').mosaic().clip(area_of_interest).selfMask().unmask(0)
+  
+  # Get the loss image.
+  # This dataset is updated yearly, so we get the latest version.
+  gfc = ee.Image('UMD/hansen/global_forest_change_2022_v1_10').clip(area_of_interest).updateMask(primaryForestMask)
+
   treecover2000 = gfc.select('treecover2000')
   lossYear = gfc.select('lossyear')
 
@@ -117,8 +163,14 @@ def forest_images(country, year):
   intactForest = treecover2000.updateMask(intactForestMask).rename('intactForest')
 
   combinedImage = cumulativeLoss.addBands(lossThisYear).addBands(intactForest)
+
+  # Construct grid and intersect with country polygon
+  buffer = area_of_interest.geometry().buffer(200000)
+  bufferClipped = buffer.difference(area_of_interest)
+  grid = area_of_interest.geometry().coveringGrid(area_of_interest.geometry().projection())
+  gridCountry = ee.FeatureCollection(grid.geometry().difference(bufferClipped, 1))
     
-  return combinedImage, area_of_interest
+  return combinedImage, area_of_interest, gridCountry
 
 # Generate interactive map of intact forest and forest loss
 def forest_map(country, year):
@@ -127,11 +179,11 @@ def forest_map(country, year):
     print("Earth Engine is not initialized. Exiting the function.")
     return
   
-  combinedImage, area_of_interest = forest_images(country, year)
+  combinedImage, area_of_interest, gridCountry = forest_images(country, year)
 
   # Create a map centered around the area of interest
   map_center = area_of_interest.geometry().centroid().coordinates().reverse().getInfo()
-  forest_map = folium.Map(location=map_center, zoom_start=7, tiles='CartoDB Positron', name='CartoDB Positron')
+  forest_map = folium.Map(location=map_center, zoom_start=6, tiles='CartoDB Positron', name='CartoDB Positron')
 
   # Add a baselayer
   folium.TileLayer('CartoDB dark_matter', name = 'CartoDB Dark Matter').add_to(forest_map)
@@ -169,7 +221,15 @@ def forest_map(country, year):
     name='Forest loss in ' + str(year)
   ).add_to(forest_map)
 
-    # Add a layer control panel to the map
+  # Add the gridCountry as a tile layer to the Folium map
+  #gridCountryMapId = gridCountry.getMapId()
+  #folium.TileLayer(
+  #    tiles=gridCountryMapId['tile_fetcher'].url_format,
+  #    attr='Google Earth Engine',
+  #    overlay=True,
+  #).add_to(forest_map)
+  
+  # Add a layer control panel to the map
   folium.LayerControl().add_to(forest_map)
 
   # Display or save the map
