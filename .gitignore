@@ -52,3 +52,7 @@ rsconnect/
 */.ipynb_checkpoints/*
 
 __pycache__/
+utils/.ipynb_checkpoints/*
+utils/__pycache__/*
+utils/.ipynb_checkpoints/
+utils/__pycache__/
